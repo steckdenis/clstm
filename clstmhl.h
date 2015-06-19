@@ -55,14 +55,16 @@ struct CLSTMText {
         net->iencode(cs, s);
         Sequence &seq = net->inputs;
         int d = net->ninput();
-        seq.clear();
-        for (int i = 0; i < neps; i++) seq.push_back(Vec::Zero(d));
+        int N = (neps+1)*s.size()+neps;
+        seq.resize(N, d, 1);
+        int index = 0;
+        for (int i = 0; i < neps; i++) seq[index++].setZero(d, 1);
         for (int pos = 0; pos < cs.size(); pos++) {
             int c = cs[pos];
             Vec v = Vec::Zero(d);
             v[c] = 1.0;
-            seq.push_back(v);
-            for (int i = 0; i < neps; i++) seq.push_back(Vec::Zero(d));
+            seq[index++] = v;
+            for (int i = 0; i < neps; i++) seq[index++].setZero(d, 1);
         }
     }
     std::wstring train(const std::wstring &in, const std::wstring &target) {
@@ -72,9 +74,9 @@ struct CLSTMText {
         net->encode(transcript, target);
         mktargets(targets, transcript, nclasses);
         ctc_align_targets(aligned, net->outputs, targets);
-        net->d_outputs.resize(net->outputs.size());
+        net->outputs.d.resize(net->outputs.size());
         for (int t = 0; t < aligned.size(); t++)
-            net->d_outputs[t] = aligned[t] - net->outputs[t];
+            net->outputs.d[t] = aligned[t] - net->outputs[t];
         net->backward();
         net->update();
         Classes output_classes;
@@ -143,9 +145,9 @@ struct CLSTMOCR {
         net->encode(transcript, target);
         mktargets(targets, transcript, nclasses);
         ctc_align_targets(aligned, net->outputs, targets);
-        net->d_outputs.resize(net->outputs.size());
+        net->outputs.d.resize(net->outputs.size());
         for (int t = 0; t < aligned.size(); t++)
-            net->d_outputs[t] = aligned[t] - net->outputs[t];
+            net->outputs.d[t] = aligned[t] - net->outputs[t];
         net->backward();
         net->update();
         Classes outputs;

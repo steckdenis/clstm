@@ -108,10 +108,18 @@ struct Sequence {
     Sequence();
     ~Sequence();
     int size();
+    int nfeat();
+    int batchsize();
     %rename(__getitem__) operator[];
     Mat &operator[](int i);
 };
 %extend Sequence {
+    Mat &values(int i) {
+        return $self->v[i];
+    }
+    Mat &deltas(int i) {
+        return $self->d[i];
+    }
     int length() {
         return $self->size();
     }
@@ -124,12 +132,12 @@ struct Sequence {
         return (*$self)[0].cols();
     }
     void assign(Sequence &other) {
-        $self->resize(other.size());
-        for(int t=0;t<$self->size();t++)
-            (*$self)[t] = other[t];
-    }
-    void resize(int len, int depth, int batchsize) {
-        throw "unimplemented";
+        $self->v.resize(other.v.size());
+        for(int t=0;t<other.v.size();t++)
+            self->v[t] = other.v[t];
+        $self->d.resize(other.d.size());
+        for(int t=0;t<other.d.size();t++)
+            self->d[t] = other.d[t];
     }
 }
 
@@ -165,8 +173,8 @@ struct INetwork;
 
 struct INetwork : virtual ITrainable {
     virtual ~INetwork();
-    Sequence inputs, d_inputs;
-    Sequence outputs, d_outputs;
+    Sequence inputs;
+    Sequence outputs;
     std::vector<std::shared_ptr<INetwork> > sub;
     std::vector<int> codec;
     std::vector<int> icodec;
@@ -189,12 +197,9 @@ struct INetwork : virtual ITrainable {
 
 void set_inputs(INetwork *net, Sequence &inputs);
 void set_targets(INetwork *net, Sequence &targets);
-void set_targets_accelerated(INetwork *net, Sequence &targets);
 void set_classes(INetwork *net, Classes &classes);
-/*void set_classes(INetwork *net, BatchClasses &classes);*/
 void train(INetwork *net, Sequence &xs, Sequence &targets);
 void ctrain(INetwork *net, Sequence &xs, Classes &cs);
-void ctrain_accelerated(INetwork *net, Sequence &xs, Classes &cs, Float lo=1e-5);
 void cpred(INetwork *net, Classes &preds, Sequence &xs);
 void mktargets(Sequence &seq, Classes &targets, int ndim);
 
@@ -383,9 +388,8 @@ void sequence_of_array(Sequence &a,PyObject *object_) {
     int N = np.dim(0);
     int d = np.dim(1);
     int bs = np.dim(2);
-    a.resize(N);
+    a.resize(N,d,bs);
     for(int t=0;t<N;t++) {
-        a[t].resize(d,bs);
         for(int i=0; i<d; i++)
             for(int b=0; b<bs; b++)
                 a[t](i,b) = np(t,i,b);
@@ -395,10 +399,10 @@ void sequence_of_array(Sequence &a,PyObject *object_) {
 void array_of_sequence(PyObject *object_,Sequence &a) {
     npa_float np(object_);
     int N = a.size();
+    int d = a.nfeat();
+    int bs = a.batchsize();
     if (N==0) throw "empty sequence";
-    int d = a[0].rows();
     if (d==0) throw "empty feature vector";
-    int bs = a[0].cols();
     if (bs==0) throw "empty batch";
     np.resize(N,d,bs);
     for(int t=0; t<N; t++) {

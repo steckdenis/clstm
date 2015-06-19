@@ -57,7 +57,6 @@ typedef Eigen::MatrixXf Mat;
 #define MAPFUNC(M, F) ((M).unaryExpr(F))
 #define SUMREDUCE(M) float(M.sum())
 #define BLOCK(A, i, j, n, m) (A).block(i, j, n, m)
-
 inline void ADDCOLS(Mat &m, Vec &v) {
     for (int i = 0; i < COLS(m); i++)
         for (int j = 0; j < ROWS(m); j++)
@@ -119,23 +118,120 @@ inline void zeroinit(Vec &m, int no) {
     m.setZero();
 }
 
-typedef vector<Mat> Sequence;
+//typedef vector<Mat> Sequence;
+struct StepRef {
+    Mat &v;
+    Mat &d;
+    StepRef(Mat &v, Mat &d) : v(v), d(d) {
+    }
+};
+
+struct Step {
+    Mat v;
+    Mat d;
+    operator StepRef() {
+        return StepRef(v, d);
+    }
+};
+
+struct Sequence {
+    // Sequence data structure. This is mostly just
+    // like a pair of nsteps x nfeat x batchsize tensors.
+    // containing the activations and the deltas for the
+    // sequence. Optionally, the deltas can be left out
+    // if no training is performed.
+    int nfeat_ = -1;
+    int bs_ = -1;
+    vector<Mat> v;
+    vector<Mat> d;
+    int size() const {
+        return v.size();
+    }
+    int nfeat() const {
+        return nfeat_;
+    }
+    int batchsize() const {
+        return bs_;
+    }
+    void check() const {
+        if (size() == 0) THROW("zero size");
+        if (nfeat_ < 1) THROW("no features");
+        if (bs_ < 1) THROW("no batch");
+        for (int i = 0; i < size(); i++) {
+            if (v[i].rows() != nfeat_) THROW("error");
+            if (v[i].cols() != bs_) THROW("error");
+            if (d.size() > 0) {
+                if (d[i].rows() != nfeat_) THROW("error");
+                if (d[i].cols() != bs_) THROW("error");
+            }
+        }
+    }
+    void like(const Sequence &other, int nfeat=-1) {
+        if (nfeat < 0) nfeat = other.nfeat();
+        other.check();
+        resize(other.size(), nfeat, other.batchsize());
+    }
+    void operator = (const Sequence &other) {
+        like(other);
+        for (int t = 0; t < v.size(); t++) v[t] = other.v[t];
+        for (int t = 0; t < d.size(); t++) d[t] = other.d[t];
+    }
+    void checkLike(const Sequence &other, int nfeat=-1) const {
+        if (nfeat < 0) nfeat = this->nfeat();
+        check();
+        other.check();
+        if (size() != other.size()) THROW("wrong size");
+        if (nfeat_ != nfeat) THROW("wrong nfeat");
+        if (batchsize() != other.batchsize()) THROW("wrong batchsize");
+    }
+    void resize(int N, int nfeat, int bs) {
+        assert(N > 0);
+        assert(nfeat > 0);
+        assert(bs > 0);
+        nfeat_ = nfeat;
+        bs_ = bs;
+        v.resize(N);
+        d.resize(N);
+        for (int i = 0; i < N; i++) {
+            v[i].setZero(nfeat, bs);
+            d[i].setZero(nfeat, bs);
+        }
+    }
+    Mat &operator[] (int index) {
+        assert(unsigned(index) < unsigned(v.size()));
+        return v[index];
+    }
+    StepRef operator() (int index) {
+        assert(unsigned(index) < unsigned(v.size()));
+        assert(unsigned(index) < unsigned(d.size()));
+        return StepRef(v[index], d[index]);
+    }
+    void copyValues(Sequence &other) {
+        other.check();
+        like(other);
+        v = other.v;
+    }
+    void copyDeltas(Sequence &other) {
+        other.check();
+        checkLike(other);
+        v = other.v;
+    }
+};
 
 inline void resize(Sequence &seq, int nsteps, int dims, int bs) {
-    seq.resize(nsteps);
-    for (int i=0; i<nsteps; i++) seq[i].resize(dims,bs);
+    seq.resize(nsteps, dims, bs);
 }
 inline int size(Sequence &seq, int dim) {
-    if (dim==0) return seq.size();
-    if (dim==1) return seq[0].rows();
-    if (dim==2) return seq[0].cols();
+    if (dim == 0) return seq.size();
+    if (dim == 1) return seq[0].rows();
+    if (dim == 2) return seq[0].cols();
     THROW("bad dim ins size");
 }
 
 typedef vector<int> Classes;
 typedef vector<Classes> BatchClasses;
 
-inline Vec timeslice(const Sequence &s, int i, int b=0) {
+inline Vec timeslice(Sequence &s, int i, int b=0) {
     Vec result(s.size());
     for (int t = 0; t < s.size(); t++)
         result[t] = s[t](i, b);
@@ -254,8 +350,8 @@ struct INetwork : virtual ITrainable {
     // Networks have input and output "ports" for sequences
     // and derivatives. These are propagated in forward()
     // and backward() methods.
-    Sequence inputs, d_inputs;
-    Sequence outputs, d_outputs;
+    Sequence inputs;
+    Sequence outputs;
 
     // Some networks have subnetworks. They should be
     // stored in the `sub` vector. That way, functions
@@ -356,20 +452,17 @@ INetwork *make_BidiLayer();
 // setting inputs and outputs
 void set_inputs(INetwork *net, Sequence &inputs);
 void set_targets(INetwork *net, Sequence &targets);
-void set_targets_accelerated(INetwork *net, Sequence &targets);
 void set_classes(INetwork *net, Classes &classes);
 void set_classes(INetwork *net, BatchClasses &classes);
 
 // single sequence training functions
 void train(INetwork *net, Sequence &xs, Sequence &targets);
 void ctrain(INetwork *net, Sequence &xs, Classes &cs);
-void ctrain_accelerated(INetwork *net, Sequence &xs, Classes &cs, Float lo=1e-5);
 void cpred(INetwork *net, Classes &preds, Sequence &xs);
 void mktargets(Sequence &seq, Classes &targets, int ndim);
 
 // batch training functions
 void ctrain(INetwork *net, Sequence &xs, BatchClasses &cs);
-void ctrain_accelerated(INetwork *net, Sequence &xs, BatchClasses &cs, Float lo=1e-5);
 void cpred(INetwork *net, BatchClasses &preds, Sequence &xs);
 void mktargets(Sequence &seq, BatchClasses &targets, int ndim);
 

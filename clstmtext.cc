@@ -103,14 +103,16 @@ void set_inputs_with_eps(INetwork *net, wstring &s, int neps) {
     net->iencode(cs, s);
     Sequence &seq = net->inputs;
     int d = net->ninput();
-    seq.clear();
-    for (int i = 0; i < neps; i++) seq.push_back(Vec::Zero(d));
+    int N = (neps+1)*s.size() + neps;
+    seq.resize(N, d, 1);
+    int index = 0;
+    for (int i = 0; i < neps; i++) seq[index++].setZero(d, 1);
     for (int pos = 0; pos < cs.size(); pos++) {
         int c = cs[pos];
         Vec v = Vec::Zero(d);
         v[c] = 1.0;
-        seq.push_back(v);
-        for (int i = 0; i < neps; i++) seq.push_back(Vec::Zero(d));
+        seq[index++] = v;
+        for (int i = 0; i < neps; i++) seq[index++].setZero(d, 1);
     }
 }
 
@@ -288,9 +290,9 @@ int main_train(int argc, char **argv) {
         mktargets(targets, classes, nclasses);
         ctc_align_targets(saligned, net->outputs, targets);
         assert(saligned.size() == net->outputs.size());
-        net->d_outputs.resize(net->outputs.size());
+        net->outputs.d.resize(net->outputs.size());
         for (int t = 0; t < saligned.size(); t++)
-            net->d_outputs[t] = saligned[t] - net->outputs[t];
+            net->outputs.d[t] = saligned[t] - net->outputs[t];
         net->backward();
         if (trial%batch == 0) net->update();
         mdarray<float> aligned;
@@ -317,7 +319,7 @@ int main_train(int argc, char **argv) {
         }
 
         if (display_every > 0 && trial%display_every == 0) {
-            net->d_outputs.resize(saligned.size());
+            net->outputs.d.resize(saligned.size());
             py->eval("clf()");
             py->subplot(4, 1, 1);
             py->evalf("title('%s')", gt.c_str());

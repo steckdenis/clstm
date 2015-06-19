@@ -96,106 +96,60 @@ bool no_update = false;
 bool verbose = false;
 
 void set_inputs(INetwork *net, Sequence &inputs) {
-    net->inputs.resize(inputs.size());
+    net->inputs.like(inputs);
     for (int t = 0; t < net->inputs.size(); t++)
         net->inputs[t] = inputs[t];
 }
 void set_targets(INetwork *net, Sequence &targets) {
     int N = net->outputs.size();
-    assert(N == targets.size());
-    net->d_outputs.resize(N);
+    net->outputs.checkLike(targets);
     for (int t = 0; t < N; t++)
-        net->d_outputs[t] = targets[t] - net->outputs[t];
-}
-void set_targets_accelerated(INetwork *net, Sequence &targets) {
-    Float lo = 1e-5;
-    assert(net->outputs.size() == targets.size());
-    int N = net->outputs.size();
-    net->d_outputs.resize(N);
-    for (int t = 0; t < N; t++) {
-        net->d_outputs[t] = -net->outputs[t];
-        for (int i = 0; i < ROWS(targets[t]); i++) {
-            for (int b = 0; b < COLS(targets[t]); b++) {
-                // only allow binary classification
-                assert(fabs(targets[t](i, b)-0) < 1e-5 || fabs(targets[t](i, b)-1) < 1e-5);
-                if (targets[t](i, b) > 0.5) {
-                    net->d_outputs[t](i, b) = 1.0/fmax(lo, net->outputs[t](i, b));
-                }
-            }
-        }
-    }
+        net->outputs.d[t] = targets[t] - net->outputs[t];
 }
 void set_classes(INetwork *net, Classes &classes) {
     int N = net->outputs.size();
     assert(N == classes.size());
-    net->d_outputs.resize(N);
+    net->outputs.d.resize(N);
     for (int t = 0; t < N; t++) {
-        net->d_outputs[t] = -net->outputs[t];
-        net->d_outputs[t](classes[t]) += 1;
+        net->outputs.d[t] = -net->outputs[t];
+        net->outputs.d[t](classes[t]) += 1;
     }
 }
 void train(INetwork *net, Sequence &xs, Sequence &targets) {
     assert(xs.size() > 0);
     assert(xs.size() == targets.size());
-    net->inputs = xs;
+    net->inputs.copyValues(xs);
     net->forward();
     set_targets(net, targets);
     net->backward();
     net->update();
 }
 void ctrain(INetwork *net, Sequence &xs, Classes &cs) {
-    net->inputs = xs;
+    net->inputs.copyValues(xs);
     net->forward();
     int len = net->outputs.size();
     assert(len > 0);
     int dim = net->outputs[0].size();
     assert(dim > 0);
-    net->d_outputs.resize(len);
+    net->outputs.d.resize(len);
     if (dim == 1) {
         for (int t = 0; t < len; t++)
-            net->d_outputs[t](0) = cs[t] ?
+            net->outputs.d[t](0) = cs[t] ?
                 1.0-net->outputs[t](0) : -net->outputs[t](0);
     } else {
         for (int t = 0; t < len; t++) {
-            net->d_outputs[t] = -net->outputs[t];
+            net->outputs.d[t] = -net->outputs[t];
             int c = cs[t];
-            net->d_outputs[t](c) = 1-net->outputs[t](c);
+            net->outputs.d[t](c) = 1-net->outputs[t](c);
         }
     }
     net->backward();
     net->update();
 }
-
-void ctrain_accelerated(INetwork *net, Sequence &xs, Classes &cs, Float lo) {
-    net->inputs = xs;
-    net->forward();
-    int len = net->outputs.size();
-    assert(len > 0);
-    int dim = net->outputs[0].size();
-    assert(dim > 0);
-    net->d_outputs.resize(len);
-    if (dim == 1) {
-        for (int t = 0; t < len; t++) {
-            if (cs[t] == 0)
-                net->d_outputs[t](0) = -1.0/fmax(lo, 1.0-net->outputs[t](0));
-            else
-                net->d_outputs[t](0) = 1.0/fmax(lo, net->outputs[t](0));
-        }
-    } else {
-        for (int t = 0; t < len; t++) {
-            net->d_outputs[t] = -net->outputs[t];
-            int c = cs[t];
-            net->d_outputs[t](c) = 1.0/fmax(lo, net->outputs[t](c));
-        }
-    }
-    net->backward();
-    net->update();
-}
-
 void cpred(INetwork *net, Classes &preds, Sequence &xs) {
     int N = xs.size();
     assert(COLS(xs[0]) == 0);
-    net->inputs = xs;
+    net->inputs.copyValues(xs);
     preds.resize(N);
     net->forward();
     assert(net->outputs.size() == N);
@@ -268,9 +222,7 @@ void INetwork::weights(const string &prefix, WeightFun f) {
 void INetwork::states(const string &prefix, StateFun f) {
     string nprefix = prefix + "." + name;
     f(nprefix+".inputs", &inputs);
-    f(nprefix+".d_inputs", &d_inputs);
     f(nprefix+".outputs", &outputs);
-    f(nprefix+".d_outputs", &d_outputs);
     mystates(nprefix, f);
     for (int i = 0; i < sub.size(); i++) {
         sub[i]->states(nprefix+"."+to_string(i), f);
@@ -278,7 +230,7 @@ void INetwork::states(const string &prefix, StateFun f) {
 }
 
 void INetwork::networks(const string &prefix, function<void (string, INetwork*)> f) {
-    string nprefix = prefix+"."+kind();
+    string nprefix = prefix+"."+name;
     f(nprefix, this);
     for (int i = 0; i < sub.size(); i++) {
         sub[i]->networks(nprefix, f);
@@ -294,15 +246,28 @@ Sequence *INetwork::getState(string name) {
 }
 
 struct NetworkBase : INetwork {
+    virtual void checkInputs() {
+        assert(inputs.size() >= 1);
+        assert(inputs.batchsize() >= 1);
+        assert(inputs.nfeat() == ninput());
+    }
+    virtual void checkAll() {
+        checkInputs();
+        assert(outputs.size() >= 1);
+        assert(outputs.batchsize() >= 1);
+        assert(outputs.nfeat() == noutput());
+        assert(outputs.size() == inputs.size());
+        assert(outputs.batchsize() == inputs.batchsize());
+    }
     Float error2(Sequence &xs, Sequence &targets) {
-        inputs = xs;
+        inputs.copyValues(xs);
         forward();
         Float total = 0.0;
-        d_outputs.resize(outputs.size());
+        outputs.checkLike(targets);
         for (int t = 0; t < outputs.size(); t++) {
             Vec delta = targets[t] - outputs[t];
             total += delta.array().square().sum();
-            d_outputs[t] = delta;
+            outputs.d[t] = delta;
         }
         backward();
         update();
@@ -334,9 +299,9 @@ struct Full : NetworkBase {
     Vec w, d_w;
     int nseq = 0;
     int nsteps = 0;
-    string mykind = string("Full_") + NONLIN::kind;
+    string mykind = string("full_") + NONLIN::kind;
     Full() {
-        name = string("full_") + NONLIN::name;
+        name = mykind;
     }
     const char *kind() {
         return mykind.c_str();
@@ -356,27 +321,32 @@ struct Full : NetworkBase {
         zeroinit(d_w, no);
     }
     void forward() {
-        outputs.resize(inputs.size());
+        checkInputs();
+        int N = inputs.size();
+        int bs = inputs.batchsize();
+        outputs.like(inputs, noutput());
         for (int t = 0; t < inputs.size(); t++) {
             outputs[t] = MATMUL(W, inputs[t]);
             ADDCOLS(outputs[t], w);
             NONLIN::f(outputs[t]);
         }
+        checkAll();
     }
     void backward() {
-        d_inputs.resize(d_outputs.size());
-        for (int t = d_outputs.size()-1; t >= 0; t--) {
-            NONLIN::df(d_outputs[t], outputs[t]);
-            d_inputs[t] = MATMUL_TR(W, d_outputs[t]);
+        checkAll();
+        for (int t = outputs.d.size()-1; t >= 0; t--) {
+            NONLIN::df(outputs.d[t], outputs[t]);
+            inputs.d[t] = MATMUL_TR(W, outputs.d[t]);
         }
         int bs = COLS(inputs[0]);
-        for (int t = 0; t < d_outputs.size(); t++) {
-            d_W += MATMUL_RT(d_outputs[t], inputs[t]);
-            for (int b = 0; b < bs; b++) d_w += COL(d_outputs[t], b);
+        for (int t = 0; t < outputs.d.size(); t++) {
+            d_W += MATMUL_RT(outputs.d[t], inputs[t]);
+            for (int b = 0; b < bs; b++) d_w += COL(outputs.d[t], b);
         }
         nseq += 1;
-        nsteps += d_outputs.size();
-        d_outputs[0](0, 0) = NAN;  // invalidate it, since we have changed it
+        nsteps += outputs.d.size();
+        outputs.d[0](0, 0) = NAN;  // invalidate it, since we have changed it
+        checkAll();
     }
     void update() {
         float lr = learning_rate;
@@ -398,8 +368,7 @@ struct Full : NetworkBase {
 };
 
 struct NoNonlin {
-    static constexpr const char *kind = "Linear";
-    static constexpr const char *name = "linear";
+    static constexpr const char *kind = "linear";
     template <class T>
     static void f(T &x) {
     }
@@ -411,8 +380,7 @@ typedef Full<NoNonlin> LinearLayer;
 REGISTER(LinearLayer);
 
 struct SigmoidNonlin {
-    static constexpr const char *kind = "Sigmoid";
-    static constexpr const char *name = "sigmoid";
+    static constexpr const char *kind = "sigmoid";
     template <class T>
     static void f(T &x) {
         x = MAPFUN(x, sigmoid);
@@ -429,8 +397,7 @@ Float tanh_(Float x) {
     return tanh(x);
 }
 struct TanhNonlin {
-    static constexpr const char *kind = "Tanh";
-    static constexpr const char *name = "tanh";
+    static constexpr const char *kind = "tanh";
     template <class T>
     static void f(T &x) {
         x = MAPFUN(x, tanh_);
@@ -450,8 +417,7 @@ inline Float heavi_(Float x) {
     return x <= 0 ? 0 : 1;
 }
 struct ReluNonlin {
-    static constexpr const char *kind = "Relu";
-    static constexpr const char *name = "relu";
+    static constexpr const char *kind = "relu";
     template <class T>
     static void f(T &x) {
         x = MAPFUN(x, relu_);
@@ -500,29 +466,31 @@ struct SoftmaxLayer : NetworkBase {
         makeEncoders();
     }
     void forward() {
-        outputs.resize(inputs.size());
-        int no = ROWS(W), bs = COLS(inputs[0]);
-        for (int t = 0; t < inputs.size(); t++) {
-            outputs[t].resize(no, bs);
+        checkInputs();
+        int N = inputs.size();
+        outputs.like(inputs, noutput());
+        for (int t = 0; t < N; t++) {
             for (int b = 0; b < COLS(outputs[t]); b++) {
                 COL(outputs[t], b) = MAPFUN(DOT(W, COL(inputs[t], b)) + w, limexp);
                 Float total = fmax(SUMREDUCE(COL(outputs[t], b)), 1e-9);
                 COL(outputs[t], b) /= total;
             }
         }
+        checkAll();
     }
     void backward() {
-        d_inputs.resize(d_outputs.size());
-        for (int t = d_outputs.size()-1; t >= 0; t--) {
-            d_inputs[t] = MATMUL_TR(W, d_outputs[t]);
+        checkAll();
+        for (int t = outputs.d.size()-1; t >= 0; t--) {
+            inputs.d[t] = MATMUL_TR(W, outputs.d[t]);
         }
         int bs = COLS(inputs[0]);
-        for (int t = 0; t < d_outputs.size(); t++) {
-            d_W += MATMUL_RT(d_outputs[t], inputs[t]);
-            for (int b = 0; b < bs; b++) d_w += COL(d_outputs[t], b);
+        for (int t = 0; t < outputs.d.size(); t++) {
+            d_W += MATMUL_RT(outputs.d[t], inputs[t]);
+            for (int b = 0; b < bs; b++) d_w += COL(outputs.d[t], b);
         }
-        nsteps += d_outputs.size();
+        nsteps += outputs.d.size();
         nseq += 1;
+        checkAll();
     }
     void update() {
         float lr = learning_rate;
@@ -558,27 +526,27 @@ struct Stacked : NetworkBase {
         return sub[0]->ninput();
     }
     void forward() {
+        checkInputs();
         assert(inputs.size() > 0);
         assert(sub.size() > 0);
         for (int n = 0; n < sub.size(); n++) {
-            if (n == 0) sub[n]->inputs = inputs;
-            else sub[n]->inputs = sub[n-1]->outputs;
+            if (n == 0) sub[n]->inputs.copyValues(inputs);
+            else sub[n]->inputs.copyValues(sub[n-1]->outputs);
             sub[n]->forward();
         }
-        outputs = sub[sub.size()-1]->outputs;
+        outputs.copyValues(sub[sub.size()-1]->outputs);
         assert(outputs.size() == inputs.size());
+        checkAll();
     }
     void backward() {
-        assert(outputs.size() > 0);
-        assert(outputs.size() == inputs.size());
-        assert(d_outputs.size() > 0);
-        assert(d_outputs.size() == outputs.size());
+        checkAll();
         for (int n = sub.size()-1; n >= 0; n--) {
-            if (n+1 == sub.size()) sub[n]->d_outputs = d_outputs;
-            else sub[n]->d_outputs = sub[n+1]->d_inputs;
+            if (n+1 == sub.size()) sub[n]->outputs.d = outputs.d;
+            else sub[n]->outputs.d = sub[n+1]->inputs.d;
             sub[n]->backward();
         }
-        d_inputs = sub[0]->d_inputs;
+        inputs.d = sub[0]->inputs.d;
+        checkAll();
     }
     void update() {
         for (int i = 0; i < sub.size(); i++)
@@ -590,7 +558,8 @@ REGISTER(Stacked);
 template <class T>
 inline void revcopy(vector<T> &out, vector<T> &in) {
     int N = in.size();
-    out.resize(N);
+    //out.resize(N);
+    assert(out.size() == in.size());
     for (int i = 0; i < N; i++) out[i] = in[N-i-1];
 }
 
@@ -608,21 +577,24 @@ struct Reversed : NetworkBase {
         return sub[0]->ninput();
     }
     void forward() {
+        checkInputs();
         assert(sub.size() == 1);
         INetwork *net = sub[0].get();
-        revcopy(net->inputs, inputs);
+        net->inputs.like(inputs);
+        revcopy(net->inputs.v, inputs.v);
         net->forward();
-        revcopy(outputs, net->outputs);
+        outputs.like(net->outputs);
+        revcopy(outputs.v, net->outputs.v);
+        checkAll();
     }
     void backward() {
+        checkAll();
         assert(sub.size() == 1);
         INetwork *net = sub[0].get();
-        assert(outputs.size() > 0);
-        assert(outputs.size() == inputs.size());
-        assert(d_outputs.size() > 0);
-        revcopy(net->d_outputs, d_outputs);
+        revcopy(net->outputs.d, outputs.d);
         net->backward();
-        revcopy(d_inputs, net->d_inputs);
+        revcopy(inputs.d, net->inputs.d);
+        checkAll();
     }
     void update() {
         sub[0]->update();
@@ -644,54 +616,53 @@ struct Parallel : NetworkBase {
         return sub[0]->ninput();
     }
     void forward() {
+        checkInputs();
         assert(sub.size() == 2);
         INetwork *net1 = sub[0].get();
         INetwork *net2 = sub[1].get();
-        net1->inputs = inputs;
-        net2->inputs = inputs;
+        net1->inputs.copyValues(inputs);
+        net2->inputs.copyValues(inputs);
         net1->forward();
         net2->forward();
-        int N = inputs.size();
-        assert(net1->outputs.size() == N);
-        assert(net2->outputs.size() == N);
-        int n1 = ROWS(net1->outputs[0]);
-        int n2 = ROWS(net2->outputs[0]);
-        outputs.resize(N);
-        int bs = COLS(net1->outputs[0]);
-        assert(bs == COLS(net2->outputs[0]));
+        int n1 = net1->noutput();
+        int n2 = net2->noutput();
+        outputs.like(inputs, n1+n2);
+        int N = outputs.size();
+        int bs = net1->outputs.batchsize();
+        net1->outputs.checkLike(outputs, net1->noutput());
+        net2->outputs.checkLike(outputs, net2->noutput());
         for (int t = 0; t < N; t++) {
-            outputs[t].resize(n1+n2, bs);
+            assert(t < outputs.size());
+            assert(outputs[t].rows() == n1+n2);
+            assert(outputs[t].cols() == bs);
             BLOCK(outputs[t], 0, 0, n1, bs) = net1->outputs[t];
             BLOCK(outputs[t], n1, 0, n2, bs) = net2->outputs[t];
         }
+        checkAll();
     }
     void backward() {
+        checkAll();
         assert(sub.size() == 2);
         INetwork *net1 = sub[0].get();
         INetwork *net2 = sub[1].get();
-        assert(outputs.size() > 0);
-        assert(outputs.size() == inputs.size());
-        assert(d_outputs.size() > 0);
-        int n1 = ROWS(net1->outputs[0]);
-        int n2 = ROWS(net2->outputs[0]);
+        net1->outputs.checkLike(outputs, net1->noutput());
+        net2->outputs.checkLike(outputs, net2->noutput());
+        int n1 = net1->outputs.nfeat();
+        int n2 = net2->outputs.nfeat();
+        int bs = net1->outputs.batchsize();
         int N = outputs.size();
-        net1->d_outputs.resize(N);
-        net2->d_outputs.resize(N);
-        int bs = COLS(net1->outputs[0]);
-        assert(bs == COLS(net2->outputs[0]));
         for (int t = 0; t < N; t++) {
-            net1->d_outputs[t].resize(n1, bs);
-            net1->d_outputs[t] = BLOCK(d_outputs[t], 0, 0, n1, bs);
-            net2->d_outputs[t].resize(n2, bs);
-            net2->d_outputs[t] = BLOCK(d_outputs[t], n1, 0, n2, bs);
+            net1->outputs.d[t] = BLOCK(outputs.d[t], 0, 0, n1, bs);
+            net2->outputs.d[t] = BLOCK(outputs.d[t], n1, 0, n2, bs);
         }
         net1->backward();
         net2->backward();
-        d_inputs.resize(N);
+        inputs.checkLike(outputs, ninput());
         for (int t = 0; t < N; t++) {
-            d_inputs[t] = net1->d_inputs[t];
-            d_inputs[t] += net2->d_inputs[t];
+            inputs.d[t] = net1->inputs.d[t];
+            inputs.d[t] += net2->inputs.d[t];
         }
+        checkAll();
     }
     void update() {
         for (int i = 0; i < sub.size(); i++) sub[i]->update();
@@ -731,13 +702,77 @@ void each(F f, T &a, Args&&... args) {
 }
 }
 
+#if 0
+void f_delay(Mat &out, Sequence &in, int t) {
+    if (t > 0) {
+        out = in[t-1];
+        return;
+    } else {
+        out.setZero(in[0].rows(), in[0].cols());
+    }
+}
+void b_delay(StepRef out, Sequence &in, int t) {
+    if (t < in.size()-1) {
+        in(t).d += out.d;
+    }
+}
+void f_1stack(Mat &out, Mat &a, Mat &b) {
+    int ni = ROWS(a);
+    int no = ROWS(b);
+    int nf = ni+no+1;
+    int bs = COLS(a);
+    BLOCK(out, 0, 0, 1, bs).setConstant(1);
+    BLOCK(out, 1, 0, ni, bs) = a;
+    BLOCK(source[t], 1+ni, 0, no, bs) = b;
+}
+void b_1stack(Mat &out, Mat &a, Mat &b) {
+    int ni = ROWS(a);
+    int no = ROWS(b);
+    int nf = ni+no+1;
+    int bs = COLS(a);
+    a.d += BLOCK(out.d, 1, 0, ni, bs);
+    b.d += BLOCK(out.d, 1+ni, 0, no, bs);
+}
+template <class F>
+void f_hlayer(Mat &out, Mat &in, Mat &w) {
+    out = nonlin<F>(MATMUL(W, source));
+}
+template <class F>
+void b_hlayer(StepRef out, StepRef in, Mat &W, Mat &DW) {
+    Mat deltas;
+    deltas = EMUL(yprime<F>(out.v), out.d);
+    in.d += MATMUL_TR(W, deltas);
+    DW += MATMUL_RT(in.v, deltas);
+}
+void f_mul(Mat &out, Mat &a, Mat &b) {
+    out = EMUL(a, b);
+}
+void b_mul(StepRef &out, StepRef &a, StepRef &b) {
+    a.d += EMUL(out.d, b.v);
+    b.d += EMUL(out.d, a.v);
+}
+void f_add(Mat &out, Mat &a, Mat &b) {
+    out = a + b;
+}
+void b_add(StepRef &out, StepRef &a, StepRef &b) {
+    a.d += out.d;
+    b.d += out.d;
+}
+template <class F>
+void f_nonlin(Mat &out, Mat &in) {
+    out = nonlin<F>(in);
+}
+template <class F>
+void b_nonlin(StepRef &out, StepRef &in) {
+    in.d += yprime<F>(out.d);
+}
+#endif
+
 template <class F = SigmoidNonlin, class G = TanhNonlin, class H = TanhNonlin>
 struct GenericNPLSTM : NetworkBase {
-#define SEQUENCES gi, gf, go, ci, state
-#define DSEQUENCES gierr, gferr, goerr, cierr, stateerr, outerr
 #define WEIGHTS WGI, WGF, WGO, WCI
 #define DWEIGHTS DWGI, DWGF, DWGO, DWCI
-    Sequence source, SEQUENCES, sourceerr, DSEQUENCES;
+    Sequence source, gi, gf, go, ci, state;
     Mat WEIGHTS, DWEIGHTS;
     Float gradient_clipping = 10.0;
     int ni, no, nf;
@@ -788,22 +823,26 @@ struct GenericNPLSTM : NetworkBase {
     void clearUpdates() {
         each([this](Mat &d) { d = Mat::Zero(no, nf); }, DWEIGHTS);
     }
-    void resize(int N) {
-        each([N](Sequence &s) {
-                 s.resize(N);
-                 for (int t = 0; t < N; t++) s[t].setConstant(NAN);
-             }, source, sourceerr, outputs, SEQUENCES, DSEQUENCES);
-        assert(source.size() == N);
-        assert(gi.size() == N);
-        assert(goerr.size() == N);
+    void resize(int N, int bs) {
+        assert(N >= 1);
+        assert(bs >= 1);
+        source.resize(N, nf, bs);
+        state.resize(N, no, bs);
+        gi.resize(N, no, bs);
+        gf.resize(N, no, bs);
+        go.resize(N, no, bs);
+        ci.resize(N, no, bs);
+        outputs.resize(N, no, bs);
     }
 #define A array()
     void forward() {
+        checkInputs();
         int N = inputs.size();
-        resize(N);
+        int bs = inputs.batchsize();
+        resize(N, bs);
         for (int t = 0; t < N; t++) {
+#if 1
             int bs = COLS(inputs[t]);
-            source[t].resize(nf, bs);
             BLOCK(source[t], 0, 0, 1, bs).setConstant(1);
             BLOCK(source[t], 1, 0, ni, bs) = inputs[t];
             if (t == 0) BLOCK(source[t], 1+ni, 0, no, bs).setConstant(0);
@@ -815,45 +854,81 @@ struct GenericNPLSTM : NetworkBase {
             state[t] = ci[t].A * gi[t].A;
             if (t > 0) state[t] += EMUL(gf[t], state[t-1]);
             outputs[t] = nonlin<H>(state[t]).A * go[t].A;
+#else
+
+            Mat last_out, last_state;
+            Mat from_input, from_state;
+            Mat linout;
+            f_delay(last_out, outputs, t);
+            f_1stack(source[t], inputs[t], last_out);
+            f_hlayer<F>(gi[t], source[t], WGI);
+            f_hlayer<F>(gf[t], source[t], WGF);
+            f_hlayer<F>(go[t], source[t], WGO);
+            f_hlayer<G>(ci[t], source[t], WCI);
+            f_delay(last_state, state, t);
+            f_mul(from_input, gi[t], ci[t]);
+            f_mul(from_state, gf[t], last_state);
+            f_add(state[t], from_input, from_state);
+            f_mul<H>(linout, go[t], state[t]);
+            f_nolin<H>(output[t], linout);
+#endif
+            checkAll();
         }
     }
     void backward() {
+        checkAll();
         int N = inputs.size();
-        d_inputs.resize(N);
         for (int t = N-1; t >= 0; t--) {
-            int bs = COLS(d_outputs[t]);
-            outerr[t] = d_outputs[t];
-            if (t < N-1) outerr[t] += BLOCK(sourceerr[t+1], 1+ni, 0, no, bs);
-            goerr[t] = EMUL(EMUL(yprime<F>(go[t]), nonlin<H>(state[t])), outerr[t]);
-            stateerr[t] = EMUL(EMUL(xprime<H>(state[t]), go[t].A), outerr[t]);
-            if (t < N-1) stateerr[t] += EMUL(stateerr[t+1], gf[t+1]);
-            if (t > 0) gferr[t] = EMUL(EMUL(yprime<F>(gf[t]), stateerr[t]), state[t-1]);
-            gierr[t] = EMUL(EMUL(yprime<F>(gi[t]), stateerr[t]), ci[t]);
-            cierr[t] = EMUL(EMUL(yprime<G>(ci[t]), stateerr[t]), gi[t]);
-            sourceerr[t] = MATMUL_TR(WGI, gierr[t]);
-            if (t > 0) sourceerr[t] += MATMUL_TR(WGF, gferr[t]);
-            sourceerr[t] += MATMUL_TR(WGO, goerr[t]);
-            sourceerr[t] += MATMUL_TR(WCI, cierr[t]);
-            d_inputs[t].resize(ni, bs);
-            d_inputs[t] = BLOCK(sourceerr[t], 1, 0, ni, bs);
+#if 1
+            int bs = COLS(outputs.d[t]);
+            if (t < N-1) outputs.d[t] += BLOCK(source.d[t+1], 1+ni, 0, no, bs);
+            go.d[t] = EMUL(EMUL(yprime<F>(go[t]), nonlin<H>(state[t])), outputs.d[t]);
+            state.d[t] = EMUL(EMUL(xprime<H>(state[t]), go[t].A), outputs.d[t]);
+            if (t < N-1) state.d[t] += EMUL(state.d[t+1], gf[t+1]);
+            if (t > 0) gf.d[t] = EMUL(EMUL(yprime<F>(gf[t]), state.d[t]), state[t-1]);
+            gi.d[t] = EMUL(EMUL(yprime<F>(gi[t]), state.d[t]), ci[t]);
+            ci.d[t] = EMUL(EMUL(yprime<G>(ci[t]), state.d[t]), gi[t]);
+            source.d[t] = MATMUL_TR(WGI, gi.d[t]);
+            if (t > 0) source.d[t] += MATMUL_TR(WGF, gf.d[t]);
+            source.d[t] += MATMUL_TR(WGO, go.d[t]);
+            source.d[t] += MATMUL_TR(WCI, ci.d[t]);
+            inputs.d[t] = BLOCK(source.d[t], 1, 0, ni, bs);
+#else
+            Mat last_out, last_state;
+            Mat from_input, from_state;
+            Mat linout;
+            f_nolin<H>(output[t], linout);
+            f_mul<H>(linout, go[t], state[t]);
+            f_add(state[t], from_input, from_state);
+            f_mul(from_state, gf[t], last_state);
+            f_mul(from_input, gi[t], ci[t]);
+            f_delay(last_state, state, t);
+            f_hlayer<G>(ci[t], source[t], WCI);
+            f_hlayer<F>(go[t], source[t], WGO);
+            f_hlayer<F>(gf[t], source[t], WGF);
+            f_hlayer<F>(gi[t], source[t], WGI);
+            f_1stack(source[t], inputs[t], last_out);
+            f_delay(last_out, outputs, t);
+#endif
         }
         if (gradient_clipping > 0 || gradient_clipping < 999) {
-            gradient_clip(gierr, gradient_clipping);
-            gradient_clip(gferr, gradient_clipping);
-            gradient_clip(goerr, gradient_clipping);
-            gradient_clip(cierr, gradient_clipping);
+            gradient_clip(gi.d, gradient_clipping);
+            gradient_clip(gf.d, gradient_clipping);
+            gradient_clip(go.d, gradient_clipping);
+            gradient_clip(ci.d, gradient_clipping);
         }
         for (int t = 0; t < N; t++) {
-            DWGI += MATMUL_RT(gierr[t], source[t]);
-            if (t > 0) DWGF += MATMUL_RT(gferr[t], source[t]);
-            DWGO += MATMUL_RT(goerr[t], source[t]);
-            DWCI += MATMUL_RT(cierr[t], source[t]);
+            DWGI += MATMUL_RT(gi.d[t], source[t]);
+            if (t > 0) DWGF += MATMUL_RT(gf.d[t], source[t]);
+            DWGO += MATMUL_RT(go.d[t], source[t]);
+            DWCI += MATMUL_RT(ci.d[t], source[t]);
         }
         nsteps += N;
         nseq += 1;
+        checkAll();
     }
 #undef A
-    void gradient_clip(Sequence &s, Float m=1.0) {
+    void gradient_clip(vector<Mat> &s, Float m=1.0) {
         for (int t = 0; t < s.size(); t++) {
             s[t] = MAPFUNC(s[t],
                            [m](Float x) {
@@ -884,19 +959,12 @@ struct GenericNPLSTM : NetworkBase {
     }
     virtual void mystates(const string &prefix, StateFun f) {
         f(prefix+".inputs", &inputs);
-        f(prefix+".d_inputs", &d_inputs);
         f(prefix+".outputs", &outputs);
-        f(prefix+".d_outputs", &d_outputs);
         f(prefix+".state", &state);
-        f(prefix+".stateerr", &stateerr);
         f(prefix+".gi", &gi);
-        f(prefix+".gierr", &gierr);
         f(prefix+".go", &go);
-        f(prefix+".goerr", &goerr);
         f(prefix+".gf", &gf);
-        f(prefix+".gferr", &gferr);
         f(prefix+".ci", &ci);
-        f(prefix+".cierr", &cierr);
     }
     Sequence *getState() {
         return &state;
@@ -1031,9 +1099,8 @@ void ctc_align_targets(Sequence &posteriors, Sequence &outputs, Sequence &target
     for (int i = 0; i < n2; i++) mtargets.row(i) = targets[i].col(0);
     Mat aligned;
     ctc_align_targets(aligned, moutputs, mtargets);
-    posteriors.resize(n1);
+    posteriors.resize(aligned.rows(), aligned.cols(), 1);
     for (int i = 0; i < n1; i++) {
-        posteriors[i].resize(aligned.row(i).size(), 1);
         posteriors[i].col(0) = aligned.row(i);
     }
 }
@@ -1041,17 +1108,15 @@ void ctc_align_targets(Sequence &posteriors, Sequence &outputs, Sequence &target
 void ctc_align_targets(Sequence &posteriors, Sequence &outputs, Classes &targets) {
     int nclasses = outputs[0].size();
     Sequence stargets;
-    stargets.resize(targets.size());
+    stargets.resize(targets.size(), nclasses, 1);
     for (int t = 0; t < stargets.size(); t++) {
-        stargets[t].resize(nclasses, 1);
-        stargets[t].fill(0);
         stargets[t](targets[t], 0) = 1.0;
     }
     ctc_align_targets(posteriors, outputs, stargets);
 }
 
 void mktargets(Sequence &seq, Classes &transcript, int ndim) {
-    seq.resize(2*transcript.size()+1);
+    seq.resize(2*transcript.size()+1, ndim, 1);
     for (int t = 0; t < seq.size(); t++) {
         seq[t].setZero(ndim, 1);
         if (t%2 == 1) seq[t](transcript[(t-1)/2]) = 1;
@@ -1086,7 +1151,7 @@ void ctc_train(INetwork *net, Sequence &xs, Sequence &targets) {
     assert(COLS(xs[0]) == 1);
     assert(xs.size() <= targets.size());
     assert(!anynan(xs));
-    net->inputs = xs;
+    net->inputs.copyValues(xs);
     net->forward();
     if (anynan(net->outputs)) THROW("got NaN");
     Sequence aligned;
@@ -1107,6 +1172,7 @@ void ctc_train(INetwork *net, Sequence &xs, BatchClasses &targets) {
     THROW("unimplemented");
 }
 }  // namespace ocropus
+
 #ifdef CLSTM_EXTRAS
 // Extra layers; this uses internal function and class definitions from this
 // file, so it's included rather than linked. It's mostly a way of slowly deprecating

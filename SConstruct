@@ -82,6 +82,7 @@ else:
     env.Append(CPPDEFINES={'NODISPLAY' : 1})
 
 env.Append(LIBS=["png","protobuf"])
+# env.Append(LIBS=["duma"])
 
 # We need to compile the protocol buffer definition as part of the build.
 

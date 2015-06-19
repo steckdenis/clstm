@@ -332,16 +332,14 @@ INormalizer *make_Normalizer(const string &name) {
 
 inline void assign(Sequence &seq, mdarray<float> &a) {
     if (a.rank() == 2) {
-        seq.resize(a.dim(0));
+        seq.resize(a.dim(0), a.dim(1), 1);
         for (int t = 0; t < seq.size(); t++) {
-            seq[t].resize(a.dim(1), 1);
             for (int i = 0; i < a.dim(1); i++)
                 seq[t](i, 0) = a(t, i);
         }
     } else if (a.rank() == 3) {
-        seq.resize(a.dim(0));
+        seq.resize(a.dim(0), a.dim(1), a.dim(2));
         for (int t = 0; t < seq.size(); t++) {
-            seq[t].resize(a.dim(1), a.dim(2));
             for (int i = 0; i < a.dim(1); i++)
                 for (int j = 0; j < a.dim(2); j++)
                     seq[t](i, j) = a(t, i, j);
@@ -355,9 +353,17 @@ void set_inputs(INetwork *net, mdarray<float> &inputs) {
     assign(net->inputs, inputs);
 }
 void set_targets(INetwork *net, mdarray<float> &targets) {
-    assign(net->d_outputs, targets);
-    for (int t = 0; t < net->outputs.size(); t++)
-        net->d_outputs[t] -= net->outputs[t];
+    int N = targets.dim(0);
+    int d = targets.dim(1);
+    int bs = targets.dim(2);
+    net->outputs.resize(N, d, bs);
+    for (int t = 0; t < net->outputs.size(); t++) {
+        for (int i = 0; i < d; i++) {
+            for (int b = 0; b < bs; b++) {
+                net->outputs.d[t](i, b) = targets(t, i, b) - net->outputs[t](i, b);
+            }
+        }
+    }
 }
 void set_targets_accelerated(INetwork *net, mdarray<float> &targets) {
     THROW("unimplemented");

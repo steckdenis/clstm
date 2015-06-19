@@ -16,6 +16,7 @@ clstm = Extension('_clstm',
         include_dirs = include_dirs,
         extra_compile_args = ['-std=c++11','-Wno-sign-compare',
             '-Dadd_raw=add','-DNODISPLAY=1',
+            "-D'THROW(x)=abort()'",
             '-DHGVERSION="\\"'+hgversion+'\\""'],
         sources=['clstm.i','clstm.cc','clstm_prefab.cc','extras.cc'])
 

@@ -307,9 +307,8 @@ inline void transpose(T &a) {
 template <class T>
 inline void assign(Sequence &seq, T &a) {
     assert(a.rank() == 2);
-    seq.resize(a.dim(0));
+    seq.resize(a.dim(0), a.dim(1), 1);
     for (int t = 0; t < a.dim(0); t++) {
-        seq[t].resize(a.dim(1), 1);
         for (int i = 0; i < a.dim(1); i++) seq[t](i, 0) = a(t, i);
     }
 }
