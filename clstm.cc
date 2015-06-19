@@ -1,3 +1,5 @@
+#define MODUPDATES
+
 #include "clstm.h"
 #include <assert.h>
 #include <iostream>
@@ -702,7 +704,8 @@ void each(F f, T &a, Args&&... args) {
 }
 }
 
-#if 0
+#ifdef MODUPDATES
+// These are experimental forward and backward steps.
 void f_delay(Mat &out, Sequence &in, int t) {
     if (t > 0) {
         out = in[t-1];
@@ -721,21 +724,27 @@ void f_1stack(Mat &out, Mat &a, Mat &b) {
     int no = ROWS(b);
     int nf = ni+no+1;
     int bs = COLS(a);
+    assert(COLS(b)==bs);
+    assert(ROWS(out)==nf);
+    assert(COLS(out)==bs);
     BLOCK(out, 0, 0, 1, bs).setConstant(1);
     BLOCK(out, 1, 0, ni, bs) = a;
-    BLOCK(source[t], 1+ni, 0, no, bs) = b;
+    BLOCK(out, 1+ni, 0, no, bs) = b;
 }
-void b_1stack(Mat &out, Mat &a, Mat &b) {
-    int ni = ROWS(a);
-    int no = ROWS(b);
+void b_1stack(StepRef out, StepRef a, StepRef b) {
+    int ni = ROWS(a.d);
+    int no = ROWS(b.d);
     int nf = ni+no+1;
-    int bs = COLS(a);
+    int bs = COLS(a.d);
+    assert(COLS(b.d)==bs);
+    assert(ROWS(out.d)==nf);
+    assert(COLS(out.d)==bs);
     a.d += BLOCK(out.d, 1, 0, ni, bs);
     b.d += BLOCK(out.d, 1+ni, 0, no, bs);
 }
 template <class F>
-void f_hlayer(Mat &out, Mat &in, Mat &w) {
-    out = nonlin<F>(MATMUL(W, source));
+void f_hlayer(Mat &out, Mat &in, Mat &W) {
+    out = nonlin<F>(MATMUL(W, in));
 }
 template <class F>
 void b_hlayer(StepRef out, StepRef in, Mat &W, Mat &DW) {
@@ -747,14 +756,14 @@ void b_hlayer(StepRef out, StepRef in, Mat &W, Mat &DW) {
 void f_mul(Mat &out, Mat &a, Mat &b) {
     out = EMUL(a, b);
 }
-void b_mul(StepRef &out, StepRef &a, StepRef &b) {
+void b_mul(StepRef out, StepRef a, StepRef b) {
     a.d += EMUL(out.d, b.v);
     b.d += EMUL(out.d, a.v);
 }
 void f_add(Mat &out, Mat &a, Mat &b) {
     out = a + b;
 }
-void b_add(StepRef &out, StepRef &a, StepRef &b) {
+void b_add(StepRef out, StepRef a, StepRef b) {
     a.d += out.d;
     b.d += out.d;
 }
@@ -763,7 +772,7 @@ void f_nonlin(Mat &out, Mat &in) {
     out = nonlin<F>(in);
 }
 template <class F>
-void b_nonlin(StepRef &out, StepRef &in) {
+void b_nonlin(StepRef out, StepRef in) {
     in.d += yprime<F>(out.d);
 }
 #endif
@@ -841,7 +850,7 @@ struct GenericNPLSTM : NetworkBase {
         int bs = inputs.batchsize();
         resize(N, bs);
         for (int t = 0; t < N; t++) {
-#if 1
+#ifndef MODUPDATES
             int bs = COLS(inputs[t]);
             BLOCK(source[t], 0, 0, 1, bs).setConstant(1);
             BLOCK(source[t], 1, 0, ni, bs) = inputs[t];
@@ -856,9 +865,9 @@ struct GenericNPLSTM : NetworkBase {
             outputs[t] = nonlin<H>(state[t]).A * go[t].A;
 #else
 
-            Mat last_out, last_state;
-            Mat from_input, from_state;
-            Mat linout;
+            Mat last_out(no, bs), last_state(no, bs);
+            Mat from_input(no, bs), from_state(no, bs);
+            Mat linout(no, bs);
             f_delay(last_out, outputs, t);
             f_1stack(source[t], inputs[t], last_out);
             f_hlayer<F>(gi[t], source[t], WGI);
@@ -869,8 +878,8 @@ struct GenericNPLSTM : NetworkBase {
             f_mul(from_input, gi[t], ci[t]);
             f_mul(from_state, gf[t], last_state);
             f_add(state[t], from_input, from_state);
-            f_mul<H>(linout, go[t], state[t]);
-            f_nolin<H>(output[t], linout);
+            f_mul(linout, go[t], state[t]);
+            f_nonlin<H>(outputs[t], linout);
 #endif
             checkAll();
         }
@@ -878,8 +887,9 @@ struct GenericNPLSTM : NetworkBase {
     void backward() {
         checkAll();
         int N = inputs.size();
+        int bs = inputs.batchsize();
         for (int t = N-1; t >= 0; t--) {
-#if 1
+#ifndef MODUPDATES
             int bs = COLS(outputs.d[t]);
             if (t < N-1) outputs.d[t] += BLOCK(source.d[t+1], 1+ni, 0, no, bs);
             go.d[t] = EMUL(EMUL(yprime<F>(go[t]), nonlin<H>(state[t])), outputs.d[t]);
@@ -894,21 +904,21 @@ struct GenericNPLSTM : NetworkBase {
             source.d[t] += MATMUL_TR(WCI, ci.d[t]);
             inputs.d[t] = BLOCK(source.d[t], 1, 0, ni, bs);
 #else
-            Mat last_out, last_state;
-            Mat from_input, from_state;
-            Mat linout;
-            f_nolin<H>(output[t], linout);
-            f_mul<H>(linout, go[t], state[t]);
-            f_add(state[t], from_input, from_state);
-            f_mul(from_state, gf[t], last_state);
-            f_mul(from_input, gi[t], ci[t]);
-            f_delay(last_state, state, t);
-            f_hlayer<G>(ci[t], source[t], WCI);
-            f_hlayer<F>(go[t], source[t], WGO);
-            f_hlayer<F>(gf[t], source[t], WGF);
-            f_hlayer<F>(gi[t], source[t], WGI);
-            f_1stack(source[t], inputs[t], last_out);
-            f_delay(last_out, outputs, t);
+            Step last_out(no, bs), last_state(no, bs);
+            Step from_input(no, bs), from_state(no, bs);
+            Step linout(no, bs);
+            b_nonlin<H>(outputs(t), linout);
+            b_mul(linout, go(t), state(t));
+            b_add(state(t), from_input, from_state);
+            b_mul(from_state, gf(t), last_state);
+            b_mul(from_input, gi(t), ci(t));
+            b_delay(last_state, state, t);
+            b_hlayer<G>(ci(t), source(t), WCI, DWCI);
+            b_hlayer<F>(go(t), source(t), WGO, DWGO);
+            b_hlayer<F>(gf(t), source(t), WGF, DWGF);
+            b_hlayer<F>(gi(t), source(t), WGI, DWGI);
+            b_1stack(source(t), inputs(t), last_out);
+            b_delay(last_out, outputs, t);
 #endif
         }
         if (gradient_clipping > 0 || gradient_clipping < 999) {

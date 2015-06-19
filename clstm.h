@@ -129,6 +129,8 @@ struct StepRef {
 struct Step {
     Mat v;
     Mat d;
+    Step() {}
+    Step(int r,int c) : v(r,c), d(r,c) {}
     operator StepRef() {
         return StepRef(v, d);
     }
